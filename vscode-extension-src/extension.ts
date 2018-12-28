@@ -5,9 +5,20 @@ import * as vscode from 'vscode';
 import * as path from "path";
 import * as fs from "fs";
 import * as child_process from "child_process";
-import { LanguageClient, LanguageClientOptions, ServerOptions } from "vscode-languageclient";
+import { LanguageClient, LanguageClientOptions, ServerOptions, NotificationType } from "vscode-languageclient";
 import { isOSUnixoid } from './osUtils';
 import { LOG } from './logger';
+
+
+export interface LoadProgressReport {
+    message: String,
+    number: Number
+}
+
+export namespace ProgressReportNotification {
+	export const type = new NotificationType<LoadProgressReport,void >('language/loadProgressReport');
+}
+
 
 // this method is called when your extension is activated
 // your extension is activated the very first time the command is executed
@@ -29,7 +40,10 @@ export async function activate(context: vscode.ExtensionContext) {
     // Options to control the language client
     let clientOptions: LanguageClientOptions = {
         // Register the server for java documents
-        documentSelector: ['kotlin'],
+        documentSelector: [
+            { scheme: 'file', language: 'kotlin' },
+            { scheme: 'untitled', language: 'kotlin' }
+        ],
         synchronize: {
             // Synchronize the setting section 'kotlin' to the server
             // NOTE: this currently doesn't do anything
@@ -44,6 +58,16 @@ export async function activate(context: vscode.ExtensionContext) {
                 vscode.workspace.createFileSystemWatcher('**/settings.gradle')
             ]
         },
+        // initializationOptions: {
+        //     //bundles: collectionJavaExtensions(extensions.all),
+        //     workspaceFolders: vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f.uri.toString()) : null,
+        //     //settings: { java: getJavaConfiguration() },
+        //     extendedClientCapabilities:{
+        //         progressReportProvider: true,
+        //         classFileContentsSupport:true
+        //     }//,
+        //     //triggerFiles: getTriggerFiles()
+        // },
         outputChannelName: 'Kotlin',
         revealOutputChannelOn: 4 // never
     }
@@ -68,8 +92,17 @@ export async function activate(context: vscode.ExtensionContext) {
     let languageClient = new LanguageClient('kotlin', 'Kotlin Language Server', serverOptions, clientOptions);
     let languageClientDisposable = languageClient.start();
 
-
+    
     await languageClient.onReady();
+
+    barItem.text = "languageClient.onReady"
+    barItem.show()
+    
+    languageClient.onNotification(ProgressReportNotification.type, (report) => {
+        barItem.text = "!!" + report.message + " " + report.number
+        barItem.show()
+    })
+
     // Push the disposable to the context's subscriptions so that the
     // client can be deactivated on extension deactivation
     context.subscriptions.push(languageClientDisposable);

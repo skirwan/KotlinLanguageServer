@@ -13,8 +13,15 @@ fun main(args: Array<String>) {
     val server = KotlinLanguageServer()
     val input = ExitingInputStream(System.`in`)
     val threads = Executors.newSingleThreadExecutor { Thread(it, "client") }
-    val launcher = LSPLauncher.createServerLauncher(server, input, System.out, threads, { it })
-    
+    val launcher = LSPLauncher.Builder<KotlinLanguageClient>()
+        .setLocalService(server)
+        .setRemoteInterface(KotlinLanguageClient::class.java)
+        .setInput(input)
+        .setOutput(System.out)
+        .setExecutorService(threads)
+        .wrapMessages { it }
+        .create()
+
     val scope = ConfigurationItem().apply {
         section = "kotlin"
     }

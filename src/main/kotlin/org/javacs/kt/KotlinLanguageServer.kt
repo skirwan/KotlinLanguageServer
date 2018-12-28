@@ -2,6 +2,7 @@ package org.javacs.kt
 
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.Either
+import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.LanguageClientAware
 import org.eclipse.lsp4j.services.LanguageServer
@@ -11,15 +12,32 @@ import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletableFuture.completedFuture
 
-class KotlinLanguageServer : LanguageServer, LanguageClientAware {
+data class LoadProgressReport(
+  val message: String,
+  val number: Int
+)
+
+interface KotlinLanguageClient : LanguageClient {
+    @JsonNotification("language/loadProgressReport")
+    fun loadProgressReport(progress: LoadProgressReport)
+}
+
+interface KotlinLanguageClientAware {
+    fun connect(client: KotlinLanguageClient)
+}
+
+class KotlinLanguageServer : LanguageServer, KotlinLanguageClientAware {
     val classPath = CompilerClassPath()
     val sourcePath = SourcePath(classPath)
     val sourceFiles = SourceFiles(sourcePath)
     private val config = Configuration()
     private val textDocuments = KotlinTextDocumentService(sourceFiles, sourcePath, config)
+    private var remoteClient: KotlinLanguageClient? = null
     private val workspaces = KotlinWorkspaceService(sourceFiles, sourcePath, classPath, textDocuments, config)
     
-    override fun connect(client: LanguageClient) {
+    override fun connect(client: KotlinLanguageClient) {
+        remoteClient = client
+
         connectLoggingBackend(client)
         
         workspaces.connect(client)
@@ -57,11 +75,16 @@ class KotlinLanguageServer : LanguageServer, LanguageClientAware {
         capabilities.executeCommandProvider = ExecuteCommandOptions(ALL_COMMANDS)
 
         if (params.rootUri != null) {
+            remoteClient?.loadProgressReport(LoadProgressReport("Initializing workspace ${params.rootUri}", 0))
+
             LOG.info("Adding workspace {} to source path", params.rootUri)
 
             val root = Paths.get(URI.create(params.rootUri))
 
+            remoteClient?.loadProgressReport(LoadProgressReport("Adding workspace roots...", 1))
             sourceFiles.addWorkspaceRoot(root)
+
+            remoteClient?.loadProgressReport(LoadProgressReport("Adding workspace class paths...", 2))
             classPath.addWorkspaceRoot(root)
         }
 
