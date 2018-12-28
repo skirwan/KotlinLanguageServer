@@ -1,21 +1,57 @@
 package org.javacs.kt
 
-import org.eclipse.lsp4j.*
+import org.eclipse.lsp4j.CodeAction
+import org.eclipse.lsp4j.CodeActionParams
+import org.eclipse.lsp4j.CodeLens
+import org.eclipse.lsp4j.CodeLensParams
+import org.eclipse.lsp4j.Command
+import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionList
+import org.eclipse.lsp4j.CompletionParams
+import org.eclipse.lsp4j.Diagnostic
+import org.eclipse.lsp4j.DidChangeTextDocumentParams
+import org.eclipse.lsp4j.DidCloseTextDocumentParams
+import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DidSaveTextDocumentParams
+import org.eclipse.lsp4j.DocumentFormattingParams
+import org.eclipse.lsp4j.DocumentHighlight
+import org.eclipse.lsp4j.DocumentOnTypeFormattingParams
+import org.eclipse.lsp4j.DocumentRangeFormattingParams
+import org.eclipse.lsp4j.DocumentSymbol
+import org.eclipse.lsp4j.DocumentSymbolParams
+import org.eclipse.lsp4j.Hover
+import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.Range
+import org.eclipse.lsp4j.ReferenceParams
+import org.eclipse.lsp4j.RenameParams
+import org.eclipse.lsp4j.SignatureHelp
+import org.eclipse.lsp4j.SymbolInformation
+import org.eclipse.lsp4j.TextDocumentEdit
+import org.eclipse.lsp4j.TextDocumentIdentifier
+import org.eclipse.lsp4j.TextDocumentPositionParams
+import org.eclipse.lsp4j.TextEdit
+import org.eclipse.lsp4j.VersionedTextDocumentIdentifier
+import org.eclipse.lsp4j.WorkspaceEdit
 import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.services.LanguageClient
 import org.eclipse.lsp4j.services.TextDocumentService
-import org.javacs.kt.completion.*
+import org.javacs.kt.commands.JAVA_TO_KOTLIN_COMMAND
+import org.javacs.kt.completion.completions
 import org.javacs.kt.definition.goToDefinition
 import org.javacs.kt.diagnostic.convertDiagnostic
 import org.javacs.kt.hover.hoverAt
 import org.javacs.kt.position.offset
+import org.javacs.kt.position.range
 import org.javacs.kt.references.findReferences
 import org.javacs.kt.signaturehelp.fetchSignatureHelpAt
 import org.javacs.kt.symbols.documentSymbols
-import org.javacs.kt.util.noResult
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
-import org.javacs.kt.commands.JAVA_TO_KOTLIN_COMMAND
+import org.javacs.kt.util.noResult
+import org.jetbrains.kotlin.psi.KtConstantExpression
+import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.KtReferenceExpression
 import org.jetbrains.kotlin.resolve.diagnostics.Diagnostics
 import java.net.URI
 import java.nio.file.Path
@@ -55,17 +91,74 @@ class KotlinTextDocumentService(
     }
 
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> = async.compute {
-        listOf(
-            Either.forLeft<Command, CodeAction>(
-                Command("Convert Java code to Kotlin", JAVA_TO_KOTLIN_COMMAND, listOf(
-                    params.textDocument.uri,
-                    params.range
-                ))
-            )
+        val actions = mutableListOf<Either<Command, CodeAction>>()
+
+        params.context.diagnostics.mapNotNullTo(actions) {
+            if(it.source == "kotlin") {
+                when(it.code) {
+                    "UNUSED_VARIABLE" -> {
+                        val (file, cursor) = recover(TextDocumentPositionParams( params.textDocument, it.range.start), false)
+                        val element = file.elementAtPoint(cursor)
+
+                        when (element) {
+                            is KtProperty -> {
+                              Either.forRight<Command, CodeAction>(removeUnusedProperty(element, file, it, params))
+                            }
+                            else -> null
+                        }
+                    }
+//                    "UNUSED_EXPRESSION" -> {
+//                    }
+                    else -> null
+                }
+            } else null
+        }
+
+      if(params.textDocument.filePath.fileName.endsWith(".java")){
+        actions += Either.forLeft<Command, CodeAction>(
+          Command("Convert Java code to Kotlin", JAVA_TO_KOTLIN_COMMAND, listOf(
+            params.textDocument.uri,
+            params.range
+          ))
         )
+      }
+
+      actions
     }
 
-    override fun hover(position: TextDocumentPositionParams): CompletableFuture<Hover?> = async.compute {
+  private fun removeUnusedProperty(element: KtProperty, file: CompiledFile, it: Diagnostic?, params: CodeActionParams): CodeAction {
+    val replacement = if (element.hasInitializer()) {
+      element.initializer?.let { rhs ->
+        if (rhs is KtConstantExpression || rhs is KtReferenceExpression) {
+          ""
+        } else {
+          rhs.text
+        }
+      } ?: ""
+    } else ""
+
+    val expressionRange = range(file.content, element.textRange)
+    val editRange = if (replacement == "") {
+      Range(expressionRange.start, Position(expressionRange.end.line + 1, 0))
+    } else {
+      expressionRange
+    }
+
+    val action = CodeAction("Remove unused variable")
+    action.diagnostics = listOf(it)
+    action.kind = "quickfix.removeUnused"
+    action.edit = WorkspaceEdit(
+      listOf(
+        TextDocumentEdit(
+          VersionedTextDocumentIdentifier(params.textDocument.uri, null),
+          listOf(TextEdit(editRange, replacement))
+        )
+      )
+    )
+    return action
+  }
+
+  override fun hover(position: TextDocumentPositionParams): CompletableFuture<Hover?> = async.compute {
         reportTime {
             LOG.info("Hovering at {} {}:{}", position.textDocument.uri, position.position.line, position.position.character)
 
