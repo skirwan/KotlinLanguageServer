@@ -85,7 +85,10 @@ fun position(content: String, offset: Int): Position {
 }
 
 fun range(content: String, range: TextRange) =
-        Range(position(content, range.startOffset), position(content, range.endOffset))
+    Range(position(content, range.startOffset), position(content, range.endOffset))
+
+fun textRange(content: String, range: Range) =
+    TextRange(offset(content, range.start), offset(content, range.end))
 
 fun location(declaration: DeclarationDescriptor): Location? {
     val psiLocation = declaration.findPsi()?.let(::location)

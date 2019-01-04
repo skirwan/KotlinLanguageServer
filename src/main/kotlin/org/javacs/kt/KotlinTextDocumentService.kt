@@ -1,5 +1,7 @@
 package org.javacs.kt
 
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiWhiteSpace
 import org.eclipse.lsp4j.CodeAction
 import org.eclipse.lsp4j.CodeActionParams
 import org.eclipse.lsp4j.CodeLens
@@ -8,7 +10,6 @@ import org.eclipse.lsp4j.Command
 import org.eclipse.lsp4j.CompletionItem
 import org.eclipse.lsp4j.CompletionList
 import org.eclipse.lsp4j.CompletionParams
-import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
@@ -43,15 +44,22 @@ import org.javacs.kt.diagnostic.convertDiagnostic
 import org.javacs.kt.hover.hoverAt
 import org.javacs.kt.position.offset
 import org.javacs.kt.position.range
+import org.javacs.kt.position.textRange
 import org.javacs.kt.references.findReferences
 import org.javacs.kt.signaturehelp.fetchSignatureHelpAt
 import org.javacs.kt.symbols.documentSymbols
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
 import org.javacs.kt.util.noResult
+import org.jetbrains.kotlin.psi.KtCallExpression
 import org.jetbrains.kotlin.psi.KtConstantExpression
+import org.jetbrains.kotlin.psi.KtDestructuringDeclarationEntry
+import org.jetbrains.kotlin.psi.KtExpression
 import org.jetbrains.kotlin.psi.KtProperty
 import org.jetbrains.kotlin.psi.KtReferenceExpression
+import org.jetbrains.kotlin.psi.KtStringTemplateExpression
+import org.jetbrains.kotlin.psi.psiUtil.getPrevSiblingIgnoringWhitespace
+import org.jetbrains.kotlin.psi.psiUtil.parents
 import org.jetbrains.kotlin.resolve.diagnostics.Diagnostics
 import java.net.URI
 import java.nio.file.Path
@@ -93,72 +101,52 @@ class KotlinTextDocumentService(
     override fun codeAction(params: CodeActionParams): CompletableFuture<List<Either<Command, CodeAction>>> = async.compute {
         val actions = mutableListOf<Either<Command, CodeAction>>()
 
-        params.context.diagnostics.mapNotNullTo(actions) {
-            if(it.source == "kotlin") {
-                when(it.code) {
-                    "UNUSED_VARIABLE" -> {
-                        val (file, cursor) = recover(TextDocumentPositionParams( params.textDocument, it.range.start), false)
-                        val element = file.elementAtPoint(cursor)
+        val file = sp.latestCompiledVersion(params.textDocument.filePath)
+        val targetRange = textRange(file.content, params.range)
 
-                        when (element) {
-                            is KtProperty -> {
-                              Either.forRight<Command, CodeAction>(removeUnusedProperty(element, file, it, params))
-                            }
-                            else -> null
+        file.compile.diagnostics.mapNotNullTo(actions) {
+            if (it.textRanges.none { range -> range.intersects(targetRange) }) return@mapNotNullTo null
+
+            val element = it.psiElement
+
+            when (it.factory.name) {
+                "UNUSED_VARIABLE" -> {
+
+
+                    when (element) {
+                        is KtProperty -> {
+                            Either.forRight<Command, CodeAction>(removeUnusedVariable(params.textDocument, file, element))
+                        }
+                        is KtDestructuringDeclarationEntry -> {
+                            null
+                        }
+                        else -> {
+                            LOG.info("Unknown AST element for UNUSED_VARIABLE diagnostic: $element")
+                            null
                         }
                     }
-//                    "UNUSED_EXPRESSION" -> {
-//                    }
-                    else -> null
                 }
-            } else null
+                "UNUSED_EXPRESSION" -> {
+                    Either.forRight<Command, CodeAction>(removeUnusedExpression(params.textDocument, file, element))
+                }
+                else -> null
+            }
         }
 
-      if(params.textDocument.filePath.fileName.endsWith(".java")){
-        actions += Either.forLeft<Command, CodeAction>(
-          Command("Convert Java code to Kotlin", JAVA_TO_KOTLIN_COMMAND, listOf(
-            params.textDocument.uri,
-            params.range
-          ))
-        )
-      }
-
-      actions
-    }
-
-  private fun removeUnusedProperty(element: KtProperty, file: CompiledFile, it: Diagnostic?, params: CodeActionParams): CodeAction {
-    val replacement = if (element.hasInitializer()) {
-      element.initializer?.let { rhs ->
-        if (rhs is KtConstantExpression || rhs is KtReferenceExpression) {
-          ""
-        } else {
-          rhs.text
+        // TODO: Detect whether this code looks like Java so this command only appears when meaningful
+        if (true) {
+            actions += Either.forLeft<Command, CodeAction>(
+                Command("Convert Java code to Kotlin", JAVA_TO_KOTLIN_COMMAND, listOf(
+                    params.textDocument.uri,
+                    params.range
+                ))
+            )
         }
-      } ?: ""
-    } else ""
 
-    val expressionRange = range(file.content, element.textRange)
-    val editRange = if (replacement == "") {
-      Range(expressionRange.start, Position(expressionRange.end.line + 1, 0))
-    } else {
-      expressionRange
+        actions
     }
 
-    val action = CodeAction("Remove unused variable")
-    action.diagnostics = listOf(it)
-    action.kind = "quickfix.removeUnused"
-    action.edit = WorkspaceEdit(
-      listOf(
-        TextDocumentEdit(
-          VersionedTextDocumentIdentifier(params.textDocument.uri, null),
-          listOf(TextEdit(editRange, replacement))
-        )
-      )
-    )
-    return action
-  }
-
-  override fun hover(position: TextDocumentPositionParams): CompletableFuture<Hover?> = async.compute {
+    override fun hover(position: TextDocumentPositionParams): CompletableFuture<Hover?> = async.compute {
         reportTime {
             LOG.info("Hovering at {} {}:{}", position.textDocument.uri, position.position.line, position.position.character)
 
@@ -180,7 +168,8 @@ class KotlinTextDocumentService(
             LOG.info("Go-to-definition at {}", describePosition(position))
 
             val (file, cursor) = recover(position, false)
-            goToDefinition(file, cursor)?.let(::listOf) ?: noResult("Couldn't find definition at ${describePosition(position)}", emptyList())
+            goToDefinition(file, cursor)?.let(::listOf)
+                ?: noResult("Couldn't find definition at ${describePosition(position)}", emptyList())
         }
     }
 
@@ -237,7 +226,8 @@ class KotlinTextDocumentService(
             LOG.info("Signature help at {}", describePosition(position))
 
             val (file, cursor) = recover(position, false)
-            fetchSignatureHelpAt(file, cursor) ?: noResult("No function call around ${describePosition(position)}", null)
+            fetchSignatureHelpAt(file, cursor)
+                ?: noResult("No function call around ${describePosition(position)}", null)
         }
     }
 
@@ -255,7 +245,7 @@ class KotlinTextDocumentService(
     override fun didChange(params: DidChangeTextDocumentParams) {
         val file = params.textDocument.filePath
 
-        sf.edit(file,  params.textDocument.version, params.contentChanges)
+        sf.edit(file, params.textDocument.version, params.contentChanges)
         lintLater(file)
     }
 
@@ -317,8 +307,7 @@ class KotlinTextDocumentService(
                 client.publishDiagnostics(PublishDiagnosticsParams(file.toUri().toString(), diagnostics))
 
                 LOG.info("Reported {} diagnostics in {}", diagnostics.size, file.fileName)
-            }
-            else LOG.info("Ignore {} diagnostics in {} because it's not open", diagnostics.size, file.fileName)
+            } else LOG.info("Ignore {} diagnostics in {} because it's not open", diagnostics.size, file.fileName)
         }
 
         val noErrors = compiled - byFile.keys
@@ -344,4 +333,73 @@ private inline fun<T> reportTime(block: () -> T): T {
         val finished = System.currentTimeMillis()
         LOG.info("Finished in {} ms", finished - started)
     }
+}
+
+private fun KtExpression?.mightHaveSideEffects(): Boolean {
+    val result = when (this) {
+        null -> false
+        is KtConstantExpression -> false
+        is KtStringTemplateExpression -> false
+        is KtCallExpression -> true // call is a subclass of reference
+        is KtReferenceExpression -> false
+        else -> true
+    }
+
+    val parenthetical = if (this != null ) "(${this::class.java})" else ""
+    LOG.info("$this.mightHaveSideEffects: $result $parenthetical")
+
+    return result
+}
+
+fun removeUnusedVariable(documentIdentifier: TextDocumentIdentifier, file: CompiledFile, element: KtProperty): CodeAction {
+    val previous = element.prevSibling
+    val atHeadOfLine = previous != null && previous is PsiWhiteSpace && previous.text.contains("\n")
+
+    val next = element.nextSibling
+    val atEndOfLine = next != null && next is PsiWhiteSpace && next.text.contains("\n")
+
+    // Cases to handle:
+    // ___val x = 10
+    // ___val x = sideEffectThing(...)
+    // ___val x = 123; val actually_used = 12
+    // ___
+    val replacement = if (element.hasInitializer() && element.initializer.mightHaveSideEffects()) {
+        element.initializer?.text ?: ""
+    } else ""
+
+    val expressionRange = range(file.content, element.textRange)
+    val editRange = if (replacement == "" && atHeadOfLine && atEndOfLine) {
+        Range(Position(expressionRange.start.line, 0), Position(expressionRange.end.line + 1, 0))
+    } else {
+        expressionRange
+    }
+
+    val action = CodeAction("Remove unused variable")
+    action.kind = "quickfix.removeUnused"
+    action.edit = WorkspaceEdit(
+        listOf(
+            TextDocumentEdit(
+                VersionedTextDocumentIdentifier(documentIdentifier.uri, null),
+                listOf(TextEdit(editRange, replacement))
+            )
+        )
+    )
+    return action
+}
+
+fun removeUnusedExpression(documentIdentifier: TextDocumentIdentifier, file: CompiledFile, element: PsiElement): CodeAction {
+    val expressionRange = range(file.content, element.textRange)
+    val editRange = Range(expressionRange.start, Position(expressionRange.end.line + 1, 0))
+
+    val action = CodeAction("Remove unused expression")
+    action.kind = "quickfix.removeUnused"
+    action.edit = WorkspaceEdit(
+        listOf(
+            TextDocumentEdit(
+                VersionedTextDocumentIdentifier(documentIdentifier.uri, null),
+                listOf(TextEdit(editRange, ""))
+            )
+        )
+    )
+    return action
 }

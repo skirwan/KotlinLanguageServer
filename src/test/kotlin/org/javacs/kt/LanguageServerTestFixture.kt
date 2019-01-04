@@ -44,6 +44,14 @@ abstract class LanguageServerTestFixture(relativeWorkspaceRoot: String) : Langua
         return TextDocumentPositionParams(fileId, position)
     }
 
+    fun codeActionParams(relativePath: String, line: Int, column: Int): CodeActionParams {
+        val file = workspaceRoot.resolve(relativePath)
+        val fileId = TextDocumentIdentifier(file.toUri().toString())
+        val position = position(line, column)
+
+        return CodeActionParams(fileId, Range(position, position), null)
+    }
+
     fun position(line: Int, column: Int) = Position(line - 1, column - 1)
 
     fun uri(relativePath: String) =
