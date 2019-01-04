@@ -51,6 +51,8 @@ import org.javacs.kt.symbols.documentSymbols
 import org.javacs.kt.util.AsyncExecutor
 import org.javacs.kt.util.Debouncer
 import org.javacs.kt.util.noResult
+import org.jetbrains.kotlin.lexer.KtToken
+import org.jetbrains.kotlin.lexer.KtTokens
 import org.jetbrains.kotlin.psi.KtCallExpression
 import org.jetbrains.kotlin.psi.KtConstantExpression
 import org.jetbrains.kotlin.psi.KtDestructuringDeclarationEntry
@@ -325,7 +327,7 @@ class KotlinTextDocumentService(
     }
 }
 
-private inline fun<T> reportTime(block: () -> T): T {
+private inline fun <T> reportTime(block: () -> T): T {
     val started = System.currentTimeMillis()
     try {
         return block()
@@ -345,31 +347,38 @@ private fun KtExpression?.mightHaveSideEffects(): Boolean {
         else -> true
     }
 
-    val parenthetical = if (this != null ) "(${this::class.java})" else ""
+    val parenthetical = if (this != null) "(${this::class.java})" else ""
     LOG.info("$this.mightHaveSideEffects: $result $parenthetical")
 
     return result
 }
 
+fun PsiElement?.lineBreak(): Boolean {
+    return this is PsiWhiteSpace && text.contains("\n")
+}
+
+fun PsiElement?.semicolon(): Boolean {
+    return this?.node?.elementType == KtTokens.SEMICOLON
+}
+
+
 fun removeUnusedVariable(documentIdentifier: TextDocumentIdentifier, file: CompiledFile, element: KtProperty): CodeAction {
-    val previous = element.prevSibling
-    val atHeadOfLine = previous != null && previous is PsiWhiteSpace && previous.text.contains("\n")
-
-    val next = element.nextSibling
-    val atEndOfLine = next != null && next is PsiWhiteSpace && next.text.contains("\n")
-
-    // Cases to handle:
-    // ___val x = 10
-    // ___val x = sideEffectThing(...)
-    // ___val x = 123; val actually_used = 12
-    // ___
     val replacement = if (element.hasInitializer() && element.initializer.mightHaveSideEffects()) {
         element.initializer?.text ?: ""
     } else ""
 
     val expressionRange = range(file.content, element.textRange)
-    val editRange = if (replacement == "" && atHeadOfLine && atEndOfLine) {
-        Range(Position(expressionRange.start.line, 0), Position(expressionRange.end.line + 1, 0))
+    val editRange = if (replacement == "") {
+        val atHeadOfLine by lazy { element.prevSibling.lineBreak() ?: false }
+        val atEndOfLine by lazy {
+            element.nextSibling.lineBreak() || (element.nextSibling.semicolon() && element.nextSibling?.nextSibling.lineBreak())
+        }
+
+        if (atHeadOfLine && atEndOfLine) {
+            Range(Position(expressionRange.start.line, 0), Position(expressionRange.end.line + 1, 0))
+        } else {
+            expressionRange
+        }
     } else {
         expressionRange
     }
